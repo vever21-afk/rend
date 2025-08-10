@@ -1,0 +1,11 @@
+
+services:
+  - type: web
+    name: telegram-bot
+    env: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /healthz
+    envVars:
+      - key: WEBHOOK_SECRET
+        generateValue: true
