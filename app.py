@@ -1,89 +1,67 @@
 import os
 import logging
-from tempfile import NamedTemporaryFile
-
+import requests
 from fastapi import FastAPI, Request
-import uvicorn
+from fastapi.responses import JSONResponse
+import openai
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
-from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.filters import CommandStart
+# === Конфигурация ===
+TELEGRAM_TOKEN = "8377982156:AAFPAx2X5tbeXxtsZ4oxS7Y8uE9o6-e6G9g"
+OPENAI_API_KEY = "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"
+WEBHOOK_SECRET = "my_secret_webhook"
+BASE_URL = "https://telegram-bot-1hu8.onrender.com"
 
-from gpt import call_gpt, transcribe_audio
-
+openai.api_key = OPENAI_API_KEY
 logging.basicConfig(level=logging.INFO)
-
-# === Конфиг (твой токен бота) ===
-BOT_TOKEN = "8377982156:AAFPAx2X5tbeXxtsZ4oxS7Y8uE9o6-e6G9g"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "supersecret-path-123")
-# ================================
-
-bot = Bot(BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-
-@dp.message(CommandStart())
-async def start(m: Message):
-    await m.answer("Привет! Я на вебхуках (Render). Напиши текст или отправь voice — отвечу.")
-
-@dp.message(F.voice)
-async def handle_voice(m: Message):
-    tmp = NamedTemporaryFile(delete=False, suffix=".ogg")
-    await m.bot.download(m.voice.file_id, tmp)
-    tmp.close()
-    try:
-        text = await transcribe_audio(tmp.name)
-        reply = await call_gpt([{"role": "user", "content": text}])
-        await m.answer(f"🗣️ Распознал: «{text}»\n\n{reply}", parse_mode=ParseMode.HTML)
-    finally:
-        try:
-            os.remove(tmp.name)
-        except Exception:
-            pass
-
-@dp.message()
-async def dialog(m: Message):
-    reply = await call_gpt([{"role": "user", "content": m.text or ""}])
-    await m.answer(reply, parse_mode=ParseMode.HTML)
 
 app = FastAPI()
 
+# === Установка вебхука ===
+def set_webhook():
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+    webhook_url = f"{BASE_URL}/webhook/{WEBHOOK_SECRET}"
+    resp = requests.post(url, json={"url": webhook_url})
+    logging.info(f"Webhook set response: {resp.text}")
+
 @app.on_event("startup")
-async def on_startup():
-    base_url = os.getenv("RENDER_EXTERNAL_URL")
-    if not base_url:
-        logging.warning("RENDER_EXTERNAL_URL not set; using placeholder (local).")
-        base_url = "https://example.com"
-    webhook_url = f"{base_url}/webhook/{WEBHOOK_SECRET}"
-    await bot.set_webhook(webhook_url, drop_pending_updates=True)
-    logging.info(f"Webhook set to: {webhook_url}")
+def startup_event():
+    set_webhook()
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    try:
-        await bot.delete_webhook(drop_pending_updates=False)
-    except Exception:
-        pass
+# === Обработка входящих сообщений ===
+@app.post(f"/webhook/{{secret}}")
+async def telegram_webhook(secret: str, request: Request):
+    if secret != WEBHOOK_SECRET:
+        return JSONResponse(status_code=403, content={"error": "Forbidden"})
 
-@app.post("/webhook/{WEBHOOK_SECRET}")
-async def telegram_webhook(request: Request):
-    update = await request.json()
-    # Лог, чтобы видеть, что POST от Telegram реально приходит
-    logging.info("WEBHOOK UPDATE: %s", str(update)[:500])
-    await dp.feed_webhook_update(bot, update)
-    return {"ok": True}
+    data = await request.json()
+    logging.info(f"Incoming update: {data}")
 
-@app.get("/healthz")
-async def healthz():
-    return {"status": "ok"}
+    if "message" in data and "text" in data["message"]:
+        chat_id = data["message"]["chat"]["id"]
+        user_text = data["message"]["text"]
 
-# Диагностика (можно удалить после проверки)
-@app.get("/diag")
-async def diag():
-    # показываем только факт наличия env (ключ у нас зашит в gpt.py, но эндпоинт полезен на будущее)
-    return {"env_OPENAI_API_KEY_set": bool(os.getenv("OPENAI_API_KEY"))}
+        try:
+            gpt_response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": user_text}
+                ]
+            )
+            answer = gpt_response.choices[0].message["content"]
+        except Exception as e:
+            answer = f"Ошибка GPT: {e}"
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+        send_message(chat_id, answer)
+
+    return JSONResponse(status_code=200, content={"ok": True})
+
+# === Функция отправки сообщений в Telegram ===
+def send_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    requests.post(url, json=payload)
+
+@app.get("/")
+def root():
+    return {"status": "Bot is running!"}
