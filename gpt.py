@@ -1,8 +1,13 @@
-
+# gpt.py — только ENV, без хардкода
 from openai import OpenAI
+import os
 
-# Embedded key (per user request). In production, use env vars.
-client = OpenAI(api_key="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")
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    # так увидим причину в логах Render, не паля ключ
+    raise RuntimeError("OPENAI_API_KEY is not set in environment")
+
+client = OpenAI(api_key=api_key)
 
 SYSTEM_PROMPT = (
     "You are a warm, concise CBT/ACT-based mental well-being assistant. "
@@ -33,3 +38,4 @@ async def transcribe_audio(file_path: str) -> str:
         return tr.strip()
     except Exception as e:
         return f"Ошибка распознавания: {e}"
+
